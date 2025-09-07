@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive World Map</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- D3.js for the map visualization -->
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <!-- TopoJSON library to convert TopoJSON to GeoJSON -->
+    <script src="https://d3js.org/topojson.v3.min.js"></script>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc, setDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        setLogLevel('debug');
+        
+        window.firebase = {
+            initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged,
+            getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc, setDoc, getDocs
+        };
+    </script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+        html, body {
+            height: 100%;
+            width: 100%;
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #1f2937, #111827);
+            overflow: hidden; /* Hide scrollbars */
+        }
+        .map-container {
+            width: 100%;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        .tooltip {
+            position: absolute;
+            text-align: center;
+            padding: 8px;
+            font: 12px sans-serif;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            border: 0px;
+            border-radius: 4px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+        .fixed-controls {
+            position: fixed;
+            display: flex;
+            gap: 0.75rem;
+            z-index: 10;
+        }
+        .fixed-controls.right {
+            bottom: 2rem;
+            right: 2rem;
+            flex-direction: column;
+            align-items: flex-end;
+        }
+        .fixed-controls.left {
+            bottom: 2rem;
+            left: 2rem;
+        }
+        /* Custom styles for the control panels (frosted glass effect) */
+        .frosted-panel {
+            background-color: rgba(0, 0, 0, 0.2);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+<body class="select-none">
+
+    <div class="map-container relative">
+        <h1 class="text-3xl sm:text-4xl font-extrabold text-gray-200 text-center absolute top-8 left-1/2 -translate-x-1/2 z-10 p-2 rounded-lg frosted-panel">
+            My World Map
+        </h1>
+        <p class="text-gray-400 text-center max-w-lg absolute top-20 left-1/2 -translate-x-1/2 z-10 px-4 py-2 rounded-lg frosted-panel hidden sm:block">
+            Click on an emoji below, then click on the map to mark a location!
+        </p>
+
+        <!-- SVG container for the map -->
+        <svg id="world-map" class="w-full h-full"></svg>
+    </div>
+
+    <!-- Fixed controls containers -->
+    <div class="fixed-controls left">
+        <button id="reset-zoom" class="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-full transition-all duration-300 transform hover:scale-105 shadow-lg">
+            Reset Zoom
+        </button>
+    </div>
+
+    <div class="fixed-controls right">
+        <!-- Emoji selection buttons -->
+        <div id="emoji-controls" class="flex flex-wrap justify-end gap-2 p-3 rounded-lg frosted-panel">
+            <button class="emoji-button bg-white text-3xl p-3 rounded-full hover:bg-gray-100 transition-all duration-200 transform hover:scale-110 focus:outline-none focus:ring-4 focus:ring-blue-500 focus:ring-opacity-50 shadow" data-emoji="📍">📍</button>
+            <button class="emoji-button bg-white text-3xl p-3 rounded-full hover:bg-gray-100 transition-all duration-200 transform hover:scale-110 focus:outline-none focus:ring-4 focus:ring-blue-500 focus:ring-opacity-50 shadow" data-emoji="❤️">❤️</button>
+            <button class="emoji-button bg-white text-3xl p-3 rounded-full hover:bg-gray-100 transition-all duration-200 transform hover:scale-110 focus:outline-none focus:ring-4 focus:ring-blue-500 focus:ring-opacity-50 shadow" data-emoji="✈️">✈️</button>
+            <button class="emoji-button bg-white text-3xl p-3 rounded-full hover:bg-gray-100 transition-all duration-200 transform hover:scale-110 focus:outline-none focus:ring-4 focus:ring-blue-500 focus:ring-opacity-50 shadow" data-emoji="🎉">🎉</button>
+            <button class="emoji-button bg-white text-3xl p-3 rounded-full hover:bg-gray-100 transition-all duration-200 transform hover:scale-110 focus:outline-none focus:ring-4 focus:ring-blue-500 focus:ring-opacity-50 shadow" data-emoji="🏠">🏠</button>
+        </div>
+    </div>
+
+
+    <!-- Tooltip for displaying location details on hover -->
+    <div id="tooltip" class="tooltip"></div>
+
+    <script type="module">
+        window.onload = function() {
+            // --- Firebase Initialization and Auth ---
+            const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+            if (Object.keys(firebaseConfig).length === 0) {
+                console.error("Firebase config is missing. Please provide a valid config.");
+                return;
+            }
+
+            const app = firebase.initializeApp(firebaseConfig);
+            const db = firebase.getFirestore(app);
+            const auth = firebase.getAuth(app);
+            let userId = null;
+
+            firebase.onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    console.log("User signed in with UID:", userId);
+                    // Start listening for map data once authenticated
+                    listenForMarkers();
+                } else {
+                    console.log("No user signed in. Signing in anonymously...");
+                    try {
+                        if (initialAuthToken) {
+                            await firebase.signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            await firebase.signInAnonymously(auth);
+                        }
+                    } catch (error) {
+                        console.error("Firebase authentication error:", error);
+                    }
+                }
+            });
+
+
+            // --- Configuration and State ---
+            const svg = d3.select("#world-map");
+            let selectedEmoji = "📍"; // Default selected emoji
+            let markers = []; // Array to store placed markers
+            let countryFeatures; // To store country data after fetching
+
+            // --- Map Initialization ---
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+            
+            svg.attr("viewBox", `0 0 ${width} ${height}`)
+               .attr("preserveAspectRatio", "xMidYMid meet");
+
+            // Define the D3 projection (mercator is a common choice)
+            let projection = d3.geoMercator()
+                .scale(height / 6); // Dynamic scale based on window height
+
+            // Create a path generator
+            const path = d3.geoPath().projection(projection);
+
+            // Group to hold all map elements (countries, names, markers) for zoom
+            const mapGroup = svg.append("g");
+
+            // Define the D3 zoom behavior
+            const zoom = d3.zoom()
+                .scaleExtent([1, 8]) // Allow zooming from 1x to 8x
+                .on("zoom", handleZoom);
+
+            svg.call(zoom);
+
+            // Fetch and render the GeoJSON data for the world map
+            d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json").then(topo => {
+                // Convert TopoJSON to GeoJSON
+                countryFeatures = topojson.feature(topo, topo.objects.countries).features;
+                
+                // Set the initial centered transform and render the map
+                const initialTransform = d3.zoomIdentity
+                    .scale(1)
+                    .translate(width / 2, height / 2);
+
+                updateMap(initialTransform);
+                svg.call(zoom.transform, initialTransform);
+
+            }).catch(error => {
+                console.error("Error loading the GeoJSON data:", error);
+                svg.append("text")
+                    .attr("x", width / 2)
+                    .attr("y", height / 2)
+                    .attr("text-anchor", "middle")
+                    .attr("fill", "#dc2626")
+                    .attr("font-size", "16px")
+                    .text("Failed to load map data.");
+            });
+
+            // --- Map Drawing Function ---
+            function updateMap(transform) {
+                // Apply the transform to the projection
+                projection.scale(transform.k * (height / 6)).translate([transform.x, transform.y]);
+                
+                // Clear the map group before redrawing
+                mapGroup.selectAll("*").remove();
+                
+                // Draw the world map
+                mapGroup.append("g")
+                    .attr("class", "countries")
+                    .selectAll("path")
+                    .data(countryFeatures)
+                    .enter().append("path")
+                    .attr("d", path)
+                    .attr("fill", "rgba(59, 130, 246, 0.1)") // 10% opacity blue fill
+                    .attr("stroke", "#3b82f6") // Solid blue border
+                    .attr("stroke-width", "0.5");
+                    
+                // Draw country names if zoomed in enough
+                if (transform.k > 2) {
+                    mapGroup.append("g")
+                        .attr("class", "country-names")
+                        .selectAll("text")
+                        .data(countryFeatures)
+                        .enter().append("text")
+                        .attr("x", d => {
+                            // Adjust X position for specific countries
+                            if (d.properties.name === "United States of America") {
+                                return path.centroid(d)[0] - 10;
+                            } else if (d.properties.name === "Canada") {
+                                return path.centroid(d)[0] - 20;
+                            } else if (d.properties.name === "Norway") {
+                                return path.centroid(d)[0] + 5;
+                            }
+                            return path.centroid(d)[0];
+                        })
+                        .attr("y", d => {
+                            // Adjust Y position for specific countries
+                            if (d.properties.name === "United States of America") {
+                                return path.centroid(d)[1] + 5;
+                            } else if (d.properties.name === "Canada") {
+                                return path.centroid(d)[1] + 15;
+                            }
+                            return path.centroid(d)[1];
+                        })
+                        .attr("dy", "0.35em") // Vertical adjustment to improve centering
+                        .attr("text-anchor", "middle")
+                        .attr("font-size", "10px") // Increased font size for better readability
+                        .attr("fill", "#9ca3af")
+                        .text(d => d.properties.name);
+                }
+                
+                // Redraw all markers
+                updateMarkers();
+            }
+
+            // --- Zoom Handler ---
+            function handleZoom(event) {
+                const { transform } = event;
+                updateMap(transform);
+            }
+            
+            // --- Marker Drawing Function ---
+            function updateMarkers() {
+                const markerSelection = mapGroup.selectAll(".marker")
+                    .data(markers, d => d.id); // Use a key function for data binding
+
+                markerSelection.enter()
+                    .append("text")
+                    .attr("class", "marker cursor-pointer")
+                    .merge(markerSelection) // Update existing markers
+                    .attr("text-anchor", "middle")
+                    .attr("font-size", "24px")
+                    .attr("x", d => projection([d.lon, d.lat])[0])
+                    .attr("y", d => projection([d.lon, d.lat])[1])
+                    .text(d => d.emoji)
+                    .on("click", function(event, d) {
+                        // Stop the map click event from firing when a marker is clicked
+                        event.stopPropagation();
+                        // Delete the marker from the database
+                        deleteMarker(d.id);
+                    });
+                
+                // Remove old markers that are no longer in the data
+                markerSelection.exit().remove();
+            }
+
+            // --- Firestore Functions ---
+            const markersColRef = () => {
+                if (!db) {
+                    console.error("Firestore is not initialized.");
+                    return null;
+                }
+                const path = `/artifacts/${appId}/public/data/markers`;
+                return firebase.collection(db, path);
+            };
+
+            const listenForMarkers = () => {
+                const colRef = markersColRef();
+                if (!colRef) return;
+
+                firebase.onSnapshot(colRef, (snapshot) => {
+                    markers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    updateMarkers();
+                    console.log("Markers updated:", markers.length);
+                }, (error) => {
+                    console.error("Error listening for markers:", error);
+                });
+            };
+
+            const addMarker = async (marker) => {
+                try {
+                    const colRef = markersColRef();
+                    if (!colRef) return;
+                    await firebase.addDoc(colRef, marker);
+                } catch (e) {
+                    console.error("Error adding document: ", e);
+                }
+            };
+            
+            const deleteMarker = async (docId) => {
+                try {
+                    const docRef = firebase.doc(db, markersColRef().path, docId);
+                    await firebase.deleteDoc(docRef);
+                    console.log("Marker deleted with ID: ", docId);
+                } catch (e) {
+                    console.error("Error deleting document: ", e);
+                }
+            };
+
+            // --- UI Interaction ---
+            // Set up event listeners for the emoji selection buttons
+            const emojiButtons = document.querySelectorAll(".emoji-button");
+            emojiButtons.forEach(button => {
+                button.addEventListener("click", () => {
+                    selectedEmoji = button.dataset.emoji;
+                    emojiButtons.forEach(btn => btn.classList.remove("ring-4", "ring-blue-500", "ring-opacity-50"));
+                    button.classList.add("ring-4", "ring-blue-500", "ring-opacity-50");
+                });
+            });
+
+            // Initially select the first button
+            emojiButtons[0].click();
+            
+            // Add a click event listener to the SVG to handle marker placement
+            mapGroup.on("click", function(event) {
+                const coords = d3.pointer(event, this);
+                const lonLat = projection.invert(coords);
+
+                const marker = {
+                    emoji: selectedEmoji,
+                    lon: lonLat[0],
+                    lat: lonLat[1],
+                };
+                addMarker(marker);
+            });
+            
+            // Reset zoom button
+            d3.select("#reset-zoom").on("click", () => {
+                const initialTransform = d3.zoomIdentity
+                    .translate(width / 2, height / 2);
+                svg.transition()
+                    .duration(750)
+                    .call(zoom.transform, initialTransform);
+            });
+
+            // Handle window resize
+            window.addEventListener('resize', () => {
+                const newWidth = window.innerWidth;
+                const newHeight = window.innerHeight;
+                svg.attr("viewBox", `0 0 ${newWidth} ${newHeight}`);
+                projection.scale(newHeight / 6).translate([newWidth / 2, newHeight / 2]);
+                updateMap(d3.zoomIdentity.translate(newWidth / 2, newHeight / 2));
+            });
+        };
+    </script>
+
+</body>
+</html>
