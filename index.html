@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Interactive World Map</title>
+    <title>Village Map</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- D3.js for the map visualization -->
@@ -14,14 +14,14 @@
     <!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc, setDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         setLogLevel('debug');
-        
+
         window.firebase = {
-            initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged,
-            getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc, setDoc, getDocs
+            initializeApp, getAuth, signInWithCustomToken,
+            getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc
         };
     </script>
     
@@ -87,7 +87,7 @@
 
     <div class="map-container relative">
         <h1 class="text-3xl sm:text-4xl font-extrabold text-gray-200 text-center absolute top-8 left-1/2 -translate-x-1/2 z-10 p-2 rounded-lg frosted-panel">
-            My World Map
+            Village Map
         </h1>
         <p class="text-gray-400 text-center max-w-lg absolute top-20 left-1/2 -translate-x-1/2 z-10 px-4 py-2 rounded-lg frosted-panel hidden sm:block">
             Click on an emoji below, then click on the map to mark a location!
@@ -101,6 +101,9 @@
     <div class="fixed-controls left">
         <button id="reset-zoom" class="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-full transition-all duration-300 transform hover:scale-105 shadow-lg">
             Reset Zoom
+        </button>
+        <button id="clear-map" class="bg-red-500 hover:bg-red-600 text-white font-semibold py-2 px-4 rounded-full transition-all duration-300 transform hover:scale-105 shadow-lg">
+            Clear Map
         </button>
     </div>
 
@@ -120,41 +123,38 @@
     <div id="tooltip" class="tooltip"></div>
 
     <script type="module">
-        window.onload = function() {
+        window.onload = async function() {
             // --- Firebase Initialization and Auth ---
-            const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-            const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+            let app, db, auth;
+            
+            try {
+                // Fetch the custom token and firebase config from your secure Vercel endpoint.
+                const response = await fetch('/api/auth');
+                const { token, firebaseConfig } = await response.json();
 
-            if (Object.keys(firebaseConfig).length === 0) {
-                console.error("Firebase config is missing. Please provide a valid config.");
+                if (!token || !firebaseConfig) {
+                    throw new Error("Failed to retrieve authentication token or config from serverless function.");
+                }
+
+                app = firebase.initializeApp(firebaseConfig);
+                db = firebase.getFirestore(app);
+                auth = firebase.getAuth(app);
+                
+                // Sign in with the custom token
+                await firebase.signInWithCustomToken(auth, token);
+                console.log("User signed in securely.");
+
+                // Start listening for map data once authenticated
+                listenForMarkers();
+
+            } catch (error) {
+                console.error("Authentication or setup error:", error);
+                // Display a user-friendly error message
+                d3.select("body").append("div")
+                    .attr("class", "fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-red-800 text-white p-4 rounded-lg shadow-xl text-center z-50")
+                    .text("Authentication failed. Please check your Vercel environment variables.");
                 return;
             }
-
-            const app = firebase.initializeApp(firebaseConfig);
-            const db = firebase.getFirestore(app);
-            const auth = firebase.getAuth(app);
-            let userId = null;
-
-            firebase.onAuthStateChanged(auth, async (user) => {
-                if (user) {
-                    userId = user.uid;
-                    console.log("User signed in with UID:", userId);
-                    // Start listening for map data once authenticated
-                    listenForMarkers();
-                } else {
-                    console.log("No user signed in. Signing in anonymously...");
-                    try {
-                        if (initialAuthToken) {
-                            await firebase.signInWithCustomToken(auth, initialAuthToken);
-                        } else {
-                            await firebase.signInAnonymously(auth);
-                        }
-                    } catch (error) {
-                        console.error("Firebase authentication error:", error);
-                    }
-                }
-            });
 
 
             // --- Configuration and State ---
@@ -162,7 +162,7 @@
             let selectedEmoji = "📍"; // Default selected emoji
             let markers = []; // Array to store placed markers
             let countryFeatures; // To store country data after fetching
-
+            
             // --- Map Initialization ---
             const width = window.innerWidth;
             const height = window.innerHeight;
@@ -199,6 +199,7 @@
 
                 updateMap(initialTransform);
                 svg.call(zoom.transform, initialTransform);
+                
 
             }).catch(error => {
                 console.error("Error loading the GeoJSON data:", error);
@@ -305,7 +306,7 @@
                     console.error("Firestore is not initialized.");
                     return null;
                 }
-                const path = `/artifacts/${appId}/public/data/markers`;
+                const path = `/world-map/public/markers`;
                 return firebase.collection(db, path);
             };
 
@@ -361,12 +362,13 @@
                 const coords = d3.pointer(event, this);
                 const lonLat = projection.invert(coords);
 
-                const marker = {
+                const newMarker = {
                     emoji: selectedEmoji,
                     lon: lonLat[0],
                     lat: lonLat[1],
                 };
-                addMarker(marker);
+                
+                addMarker(newMarker);
             });
             
             // Reset zoom button
@@ -376,6 +378,13 @@
                 svg.transition()
                     .duration(750)
                     .call(zoom.transform, initialTransform);
+            });
+            
+            // Clear map button
+            d3.select("#clear-map").on("click", () => {
+                // Deleting all markers is not trivial with Firestore,
+                // so we will show a confirmation message instead.
+                alert("To clear all markers, you need to delete them individually. Click on a marker to remove it.");
             });
 
             // Handle window resize
